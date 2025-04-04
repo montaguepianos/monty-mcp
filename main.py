@@ -67,7 +67,7 @@ def get_google_calendar_service():
     """Get Google Calendar service using service account."""
     try:
         credentials = service_account.Credentials.from_service_account_file(
-            'credentials/service-account-key.json',
+            '/etc/secrets/service-account-key.json',
             scopes=SCOPES
         )
         return build('calendar', 'v3', credentials=credentials)
