@@ -93,23 +93,23 @@ def check_distance(origin: str) -> Optional[int]:
 def check_distance_from_adjacent_bookings(service, date: str, time: str, customer_address: str) -> bool:
     """Check if the booking location is within 10 miles of any adjacent bookings."""
     try:
-        # Get the booking time and ensure it's at the correct hour/minute
-        # Parse the booking time and create a naive datetime
+        # Get the booking time as a naive datetime first
         date_obj = datetime.strptime(date, '%Y-%m-%d')
-        
-        # For standard slots, parse the time directly
         time_parts = time.split(':')
         hour = int(time_parts[0])
         minute = int(time_parts[1]) if len(time_parts) > 1 else 0
         
-        # Create a datetime with the exact time and then make it timezone aware
-        booking_datetime = datetime(
+        # Create a naive datetime
+        booking_datetime_naive = datetime(
             year=date_obj.year, 
             month=date_obj.month, 
             day=date_obj.day, 
             hour=hour, 
             minute=minute
-        ).astimezone()
+        )
+        
+        # Create an aware version for display only
+        booking_datetime = booking_datetime_naive.astimezone()
         
         print(f"\nChecking distances for slot on {date} at {time}")
         print(f"Parsed booking time: {booking_datetime.strftime('%Y-%m-%d %H:%M')}")
@@ -118,16 +118,20 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
         print(f"Checking bookings for {booking_datetime.strftime('%Y-%m-%d')} at {booking_datetime.strftime('%H:%M')}")
         print(f"{'='*80}\n")
         
-        # Get events for the entire day
-        day_start = booking_datetime.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_end = (day_start + timedelta(days=1))
+        # Get events for the entire day - use naive datetimes for consistency
+        day_start = booking_datetime_naive.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = day_start + timedelta(days=1)
+        
+        # Convert to aware datetime for API call
+        time_min = day_start.astimezone().isoformat()
+        time_max = day_end.astimezone().isoformat()
         
         print(f"Searching for events between {day_start.strftime('%Y-%m-%d %H:%M')} and {day_end.strftime('%Y-%m-%d %H:%M')}")
         
         events_result = service.events().list(
             calendarId=CALENDAR_ID,
-            timeMin=day_start.isoformat(),
-            timeMax=day_end.isoformat(),
+            timeMin=time_min,
+            timeMax=time_max,
             singleEvents=True,
             orderBy='startTime',
             maxResults=100
@@ -206,25 +210,30 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
                         event_address = location_words[-1].title()
                 
                 if event_start:
-                    event_datetime = datetime.fromisoformat(event_start.replace('Z', '+00:00')).astimezone()
-                    # Extract just the hour and minute to avoid timezone issues
+                    event_datetime_str = event_start.replace('Z', '+00:00')
+                    event_datetime = datetime.fromisoformat(event_datetime_str).astimezone()
+                    
+                    # Extract just hour and minute (as integers)
                     event_hour = event_datetime.hour
                     event_minute = event_datetime.minute
                     
-                    # Recreate the datetime to ensure consistency
-                    corrected_datetime = datetime(
+                    # Create a naive datetime for comparison
+                    event_naive = datetime(
                         year=date_obj.year,
                         month=date_obj.month,
                         day=date_obj.day,
                         hour=event_hour,
                         minute=event_minute
-                    ).astimezone()
+                    )
                     
-                    event_details.append((corrected_datetime, event_address))
-                    print(f"Added booking: {corrected_datetime.strftime('%H:%M')} ({event_hour}:{event_minute:02d}) at {event_address}")
+                    # For logs, also create an aware version
+                    event_aware = event_naive.astimezone()
                     
-                    # Add debug to show original vs corrected time
-                    print(f"  Original time: {event_datetime.strftime('%H:%M')}, Corrected: {corrected_datetime.strftime('%H:%M')}")
+                    # Use naive datetime for internal comparisons
+                    event_details.append((event_naive, event_address))
+                    
+                    print(f"Added booking: {event_aware.strftime('%H:%M')} ({event_hour}:{event_minute:02d}) at {event_address}")
+                    print(f"  Original time: {event_datetime.strftime('%H:%M')}, Corrected: {event_aware.strftime('%H:%M')}")
             except Exception as e:
                 print(f"Error processing event: {e}")
                 continue
@@ -316,71 +325,38 @@ def get_available_slots(date: str) -> List[str]:
 def check_slot_availability(service, date: str, time: str) -> bool:
     """Check if a specific time slot is available in Google Calendar."""
     try:
-        # Ensure date is in YYYY-MM-DD format
-        try:
-            # If date is already in YYYY-MM-DD format, use it directly
-            slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M %p')
-        except ValueError:
-            try:
-                # Try with just YYYY-MM-DD and HH:MM format
-                slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M')
-            except ValueError:
-                # If date is in another format, try to parse it
-                try:
-                    # Try parsing with different formats
-                    for fmt in ['%A, %B %d', '%B %d', '%d/%m/%Y', '%Y-%m-%d']:
-                        try:
-                            slot_datetime = datetime.strptime(f"{date} {time}", f"{fmt} %H:%M")
-                            break
-                        except ValueError:
-                            continue
-                    else:
-                        raise ValueError(f"Could not parse date: {date}")
-                except ValueError as e:
-                    print(f"Error parsing date: {e}")
-                    return False
+        # Create a naive datetime first
+        date_obj = datetime.strptime(date, '%Y-%m-%d')
         
-        # Add debug print to see the original date/time
-        print(f"Original slot check: {date} {time} -> {slot_datetime}")
-        
-        # Check if this slot is specifically 10:30, which might have a time zone issue
-        # and we need to ensure we're looking for events at exactly 10:30, not 9:30
-        slot_hour = slot_datetime.hour
-        slot_minute = slot_datetime.minute
-        is_known_slot = False
-        
-        # Check if this is one of our standard slots (only necessary in problem cases)
-        for day_slots in AVAILABLE_SLOTS.values():
-            for slot_time in day_slots:
-                slot_parts = slot_time.split(':')
-                if len(slot_parts) == 2:
-                    if int(slot_parts[0]) == slot_hour and int(slot_parts[1]) == slot_minute:
-                        is_known_slot = True
-                        break
-            if is_known_slot:
-                break
-        
-        # Build the time window to check for events
-        # For known slots, use exact hours. For arbitrary times, use the usual 1-hour window.
-        if is_known_slot:
-            # Make sure we're looking for EXACTLY the slot time with no timezone offset issues
-            # Create a naive datetime for the exact slot time
-            naive_slot = datetime(
-                year=slot_datetime.year, 
-                month=slot_datetime.month, 
-                day=slot_datetime.day,
-                hour=slot_hour,
-                minute=slot_minute
-            )
-            # Add timezone explicitly using astimezone() without any offset calculation
-            time_min = naive_slot.replace(tzinfo=datetime.now().astimezone().tzinfo).isoformat()
-            time_max = (naive_slot.replace(tzinfo=datetime.now().astimezone().tzinfo) + timedelta(minutes=30)).isoformat()
-            print(f"Checking availability for EXACT slot time: {time_min} to {time_max}")
+        # Parse time components
+        time_parts = time.split(':')
+        if len(time_parts) == 2:
+            hour = int(time_parts[0])
+            minute = int(time_parts[1])
         else:
-            # Use the original method for non-standard times
-            time_min = slot_datetime.astimezone().isoformat()
-            time_max = (slot_datetime + timedelta(hours=1)).astimezone().isoformat()
-            print(f"Checking availability for general time slot: {time_min} to {time_max}")
+            # Default to top of the hour if no minutes specified
+            hour = int(time)
+            minute = 0
+        
+        # Create naive datetime for the slot
+        slot_naive = datetime(
+            year=date_obj.year,
+            month=date_obj.month,
+            day=date_obj.day,
+            hour=hour,
+            minute=minute
+        )
+        
+        # Create aware version for API call
+        slot_aware = slot_naive.astimezone()
+        
+        print(f"Checking availability for: {date} {time} -> {slot_aware}")
+        
+        # Create time window - use consistent timezone handling
+        time_min = slot_aware.isoformat()
+        time_max = (slot_aware + timedelta(minutes=30)).isoformat()
+        
+        print(f"Checking time window: {time_min} to {time_max}")
         
         # Check events in the calendar
         events_result = service.events().list(
