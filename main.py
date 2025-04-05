@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 import requests
 from typing import Dict, List, Optional
 import logging
+import re
 
 # If modifying these scopes, delete the file token.pickle.
 SCOPES = ['https://www.googleapis.com/auth/calendar']
@@ -111,9 +112,20 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
         # Create an aware version for display only
         booking_datetime = booking_datetime_naive.astimezone()
         
+        # Make sure we have a postcode for the customer
+        customer_postcode = customer_address
+        # If it looks like a full address, try to extract the postcode
+        if ',' in customer_address or len(customer_address.split()) > 2:
+            # Try to extract postcode using regex
+            postcode_pattern = r'[A-Z]{1,2}[0-9]{1,2}[A-Z]?\s?[0-9][A-Z]{2}'
+            postcode_matches = re.findall(postcode_pattern, customer_address.upper())
+            if postcode_matches:
+                customer_postcode = postcode_matches[0]
+                print(f"Extracted customer postcode: {customer_postcode} from address: {customer_address}")
+        
         print(f"\nChecking distances for slot on {date} at {time}")
         print(f"Parsed booking time: {booking_datetime.strftime('%Y-%m-%d %H:%M')}")
-        print(f"Customer postcode: {customer_address}")
+        print(f"Customer postcode: {customer_postcode}")
         print(f"\n{'='*80}")
         print(f"Checking bookings for {booking_datetime.strftime('%Y-%m-%d')} at {booking_datetime.strftime('%H:%M')}")
         print(f"{'='*80}\n")
@@ -222,11 +234,28 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
                     if location_words:
                         event_address = location_words[-1].title()
                 
+                # Extract postcode from event address if possible
+                event_postcode = event_address
+                if event_address and (',' in event_address or len(event_address.split()) > 2):
+                    # Try to extract postcode using regex
+                    postcode_matches = re.findall(postcode_pattern, event_address.upper())
+                    if postcode_matches:
+                        event_postcode = postcode_matches[0]
+                        print(f"Extracted event postcode: {event_postcode} from address: {event_address}")
+                    else:
+                        # If no postcode detected, use the last part of the address as it might be the postcode
+                        address_parts = [part.strip() for part in event_address.split(',')]
+                        if address_parts:
+                            possible_postcode = address_parts[-1].strip()
+                            if possible_postcode and len(possible_postcode.split()) <= 2:
+                                event_postcode = possible_postcode
+                                print(f"Using last part of event address as postcode: {event_postcode}")
+                
                 if event_start:
                     event_datetime_str = event_start.replace('Z', '+00:00')
                     event_datetime = datetime.fromisoformat(event_datetime_str).astimezone()
                     
-                    # Extract just hour and minute (as integers)
+                    # Extract exact components to avoid timezone shifts
                     event_hour = event_datetime.hour
                     event_minute = event_datetime.minute
                     
@@ -242,11 +271,13 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
                     # For logs, also create an aware version
                     event_aware = event_naive.astimezone()
                     
-                    # Use naive datetime for internal comparisons
-                    event_details.append((event_naive, event_address))
+                    # Use naive datetime for internal comparisons and the extracted postcode
+                    event_details.append((event_naive, event_postcode))
                     
                     print(f"Added booking: {event_aware.strftime('%H:%M')} ({event_hour}:{event_minute:02d}) at {event_address}")
                     print(f"  Original time: {event_datetime.strftime('%H:%M')}, Corrected: {event_aware.strftime('%H:%M')}")
+                    if event_postcode != event_address:
+                        print(f"  Using postcode: {event_postcode} for distance calculation")
             except Exception as e:
                 print(f"Error processing event: {e}")
                 continue
@@ -261,7 +292,7 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
         # Find the position where our new booking would fit
         insert_index = 0
         for i, (event_time, _) in enumerate(event_details):
-            if event_time > booking_datetime_naive:  # Compare naive with naive
+            if event_time > booking_datetime_naive:  # Compare same types (both naive)
                 break
             insert_index = i + 1
         
@@ -274,7 +305,7 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
         if insert_index > 0:
             prev_time, prev_address = event_details[insert_index - 1]
             if prev_address:  # Only check distance if we have a valid address
-                url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={customer_address}&destinations={prev_address}&key={DISTANCE_MATRIX_API_KEY}"
+                url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={customer_postcode}&destinations={prev_address}&key={DISTANCE_MATRIX_API_KEY}"
                 response = requests.get(url)
                 data = response.json()
                 
@@ -288,7 +319,7 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
         if insert_index < len(event_details):
             next_time, next_address = event_details[insert_index]
             if next_address:  # Only check distance if we have a valid address
-                url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={customer_address}&destinations={next_address}&key={DISTANCE_MATRIX_API_KEY}"
+                url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={customer_postcode}&destinations={next_address}&key={DISTANCE_MATRIX_API_KEY}"
                 response = requests.get(url)
                 data = response.json()
                 
@@ -659,9 +690,28 @@ def create_booking_endpoint():
         if not check_slot_availability(service, data['date'], data['time']):
             return jsonify({'error': 'Selected time slot is no longer available'}), 400
 
-        distance = check_distance(data['address'])
+        # Extract postcode from address for distance checking
+        address = data['address']
+        postcode = None
+        
+        # Common UK postcode pattern: 1-2 letters, 1-2 digits, space, 1 digit, 2 letters
+        postcode_pattern = r'[A-Z]{1,2}[0-9]{1,2}[A-Z]?\s?[0-9][A-Z]{2}'
+        postcode_matches = re.findall(postcode_pattern, address.upper())
+        
+        if postcode_matches:
+            postcode = postcode_matches[0]
+            print(f"Extracted postcode: {postcode} from address: {address}")
+        else:
+            # If no postcode detected, use the last part of the address as it might be the postcode
+            address_parts = [part.strip() for part in address.split(',')]
+            if address_parts:
+                postcode = address_parts[-1].strip()
+                print(f"Using last part of address as postcode: {postcode}")
+
+        print(f"Checking distance for postcode: {postcode}")
+        distance = check_distance(postcode)
         if distance is None:
-            return jsonify({'error': 'Could not verify distance'}), 400
+            return jsonify({'error': 'Could not verify distance from postcode. Please ensure your address includes a valid UK postcode.'}), 400
 
         # Create the booking
         if create_booking(service, data['date'], data['time'], 
@@ -712,12 +762,30 @@ def direct_booking():
             print("Selected time slot is no longer available")
             return jsonify({'error': 'Selected time slot is no longer available'}), 400
         
+        # Extract postcode from address for distance checking
+        address = data['address']
+        postcode = None
+        
+        # Common UK postcode pattern: 1-2 letters, 1-2 digits, space, 1 digit, 2 letters
+        postcode_pattern = r'[A-Z]{1,2}[0-9]{1,2}[A-Z]?\s?[0-9][A-Z]{2}'
+        postcode_matches = re.findall(postcode_pattern, address.upper())
+        
+        if postcode_matches:
+            postcode = postcode_matches[0]
+            print(f"Extracted postcode: {postcode} from address: {address}")
+        else:
+            # If no postcode detected, use the last part of the address as it might be the postcode
+            address_parts = [part.strip() for part in address.split(',')]
+            if address_parts:
+                postcode = address_parts[-1].strip()
+                print(f"Using last part of address as postcode: {postcode}")
+        
         # Check distance
-        print(f"Checking distance for address: {data['address']}")
-        distance = check_distance(data['address'])
+        print(f"Checking distance for postcode: {postcode}")
+        distance = check_distance(postcode)
         if distance is None:
-            print("Could not verify distance")
-            return jsonify({'error': 'Could not verify distance'}), 400
+            print("Could not verify distance from postcode")
+            return jsonify({'error': 'Could not verify distance from postcode. Please ensure your address includes a valid UK postcode.'}), 400
         
         # Create the booking
         print("Attempting to create booking...")
