@@ -179,8 +179,21 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
                     # This is a time slot list, create individual events for each time
                     time_slots = summary.split()
                     for slot in time_slots:
-                        slot_datetime = datetime.strptime(f"{date} {slot}", '%Y-%m-%d %H:%M').astimezone()
-                        event_details.append((slot_datetime, None))  # No address for time slot lists
+                        # Create naive datetime for time slots
+                        slot_parts = slot.split(':')
+                        slot_hour = int(slot_parts[0])
+                        slot_minute = int(slot_parts[1]) if len(slot_parts) > 1 else 0
+                        
+                        # Create naive datetime for this slot
+                        slot_naive = datetime(
+                            year=date_obj.year,
+                            month=date_obj.month,
+                            day=date_obj.day,
+                            hour=slot_hour,
+                            minute=slot_minute
+                        )
+                        
+                        event_details.append((slot_naive, None))  # No address for time slot lists
                     continue
                 
                 # Get the location from either the description or the summary
@@ -248,7 +261,7 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
         # Find the position where our new booking would fit
         insert_index = 0
         for i, (event_time, _) in enumerate(event_details):
-            if event_time > booking_datetime:
+            if event_time > booking_datetime_naive:  # Compare naive with naive
                 break
             insert_index = i + 1
         
@@ -268,7 +281,7 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
                 if data['status'] == 'OK' and data['rows'][0]['elements'][0]['status'] == 'OK':
                     distance = data['rows'][0]['elements'][0]['distance']['value']  # Distance in meters
                     prev_distance = distance / 1609.34  # Convert to miles
-                    time_diff = (booking_datetime - prev_time).total_seconds() / 3600  # Convert to hours
+                    time_diff = (booking_datetime_naive - prev_time).total_seconds() / 3600  # Convert to hours
                     distances.append(('previous', prev_distance, time_diff, prev_address))
         
         # Check next booking if it exists
@@ -282,7 +295,7 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
                 if data['status'] == 'OK' and data['rows'][0]['elements'][0]['status'] == 'OK':
                     distance = data['rows'][0]['elements'][0]['distance']['value']  # Distance in meters
                     next_distance = distance / 1609.34  # Convert to miles
-                    time_diff = (next_time - booking_datetime).total_seconds() / 3600  # Convert to hours
+                    time_diff = (next_time - booking_datetime_naive).total_seconds() / 3600  # Convert to hours
                     distances.append(('next', next_distance, time_diff, next_address))
         
         # Print distances in a clear format
@@ -347,12 +360,13 @@ def check_slot_availability(service, date: str, time: str) -> bool:
             minute=minute
         )
         
-        # Create aware version for API call
+        # Create aware version for API call only
         slot_aware = slot_naive.astimezone()
         
         print(f"Checking availability for: {date} {time} -> {slot_aware}")
         
         # Create time window - use consistent timezone handling
+        # For exact time checking, use a 30-minute window
         time_min = slot_aware.isoformat()
         time_max = (slot_aware + timedelta(minutes=30)).isoformat()
         
@@ -376,10 +390,18 @@ def check_slot_availability(service, date: str, time: str) -> bool:
                 start_time = event.get('start', {}).get('dateTime', '')
                 if start_time:
                     try:
-                        event_time = datetime.fromisoformat(start_time.replace('Z', '+00:00')).astimezone()
-                        print(f"- {event.get('summary', '')} at {event_time.strftime('%Y-%m-%d %H:%M')} ({start_time})")
-                    except:
-                        print(f"- {event.get('summary', '')} at {start_time}")
+                        # Parse the event time as naive for consistent comparison
+                        event_datetime = datetime.fromisoformat(start_time.replace('Z', '+00:00')).astimezone()
+                        event_naive = datetime(
+                            year=date_obj.year,
+                            month=date_obj.month,
+                            day=date_obj.day,
+                            hour=event_datetime.hour,
+                            minute=event_datetime.minute
+                        )
+                        print(f"- {event.get('summary', '')} at {event_naive.strftime('%Y-%m-%d %H:%M')} (original: {start_time})")
+                    except Exception as e:
+                        print(f"- {event.get('summary', '')} at {start_time} (error parsing: {e})")
                 else:
                     print(f"- {event.get('summary', '')} at {start_time}")
             return False
@@ -461,8 +483,8 @@ def create_booking(service, date: str, time: str, customer_name: str, address: s
         hour = int(time_parts[0])
         minute = int(time_parts[1]) if len(time_parts) > 1 else 0
         
-        # Create a datetime with the correct time
-        slot_datetime = datetime(
+        # Create a naive datetime first
+        slot_naive = datetime(
             year=date_obj.year,
             month=date_obj.month,
             day=date_obj.day,
@@ -470,16 +492,18 @@ def create_booking(service, date: str, time: str, customer_name: str, address: s
             minute=minute
         )
         
+        # Convert to timezone-aware for API call
+        aware_datetime = slot_naive.astimezone()
+        
         # Extract area from address
         # Split by comma and take the second part (after the street address)
         address_parts = [part.strip() for part in address.split(',')]
         area = address_parts[1] if len(address_parts) > 1 else ""
         
-        # Make the datetime timezone aware for Google Calendar
-        aware_datetime = slot_datetime.astimezone()
-        
         # Log the exact time being used
         print(f"Creating booking for exact time: {aware_datetime.strftime('%Y-%m-%d %H:%M')} (Hour: {hour}, Minute: {minute})")
+        print(f"Naive time: {slot_naive.strftime('%Y-%m-%d %H:%M')}")
+        print(f"Aware time: {aware_datetime.strftime('%Y-%m-%d %H:%M%z')}")
         
         event = {
             'summary': f'{customer_name} {area}',
