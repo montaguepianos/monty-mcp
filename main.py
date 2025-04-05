@@ -25,7 +25,7 @@ CALENDAR_ID = 'clivestunings@googlemail.com'  # Clive's tuning calendar
 AVAILABLE_SLOTS = {
     'Tuesday': ['10:30', '12:00', '13:30', '15:00', '16:00'],
     'Wednesday': ['09:00', '10:30', '12:00', '13:30', '15:00', '16:00'],
-    'Thursday': ['10:30', '12:00', '13:30', '15:00']
+    'Thursday': ['10:30', '12:00', '13:30', '15:00', '16:00']
 }
 
 app = Flask(__name__)
@@ -93,10 +93,26 @@ def check_distance(origin: str) -> Optional[int]:
 def check_distance_from_adjacent_bookings(service, date: str, time: str, customer_address: str) -> bool:
     """Check if the booking location is within 10 miles of any adjacent bookings."""
     try:
-        # Get the booking time and make it timezone aware
-        booking_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M').astimezone()
+        # Get the booking time and ensure it's at the correct hour/minute
+        # Parse the booking time and create a naive datetime
+        date_obj = datetime.strptime(date, '%Y-%m-%d')
+        
+        # For standard slots, parse the time directly
+        time_parts = time.split(':')
+        hour = int(time_parts[0])
+        minute = int(time_parts[1]) if len(time_parts) > 1 else 0
+        
+        # Create a datetime with the exact time and then make it timezone aware
+        booking_datetime = datetime(
+            year=date_obj.year, 
+            month=date_obj.month, 
+            day=date_obj.day, 
+            hour=hour, 
+            minute=minute
+        ).astimezone()
         
         print(f"\nChecking distances for slot on {date} at {time}")
+        print(f"Parsed booking time: {booking_datetime.strftime('%Y-%m-%d %H:%M')}")
         print(f"Customer postcode: {customer_address}")
         print(f"\n{'='*80}")
         print(f"Checking bookings for {booking_datetime.strftime('%Y-%m-%d')} at {booking_datetime.strftime('%H:%M')}")
@@ -191,8 +207,24 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
                 
                 if event_start:
                     event_datetime = datetime.fromisoformat(event_start.replace('Z', '+00:00')).astimezone()
-                    event_details.append((event_datetime, event_address))
-                    print(f"Added booking: {event_datetime.strftime('%H:%M')} at {event_address}")
+                    # Extract just the hour and minute to avoid timezone issues
+                    event_hour = event_datetime.hour
+                    event_minute = event_datetime.minute
+                    
+                    # Recreate the datetime to ensure consistency
+                    corrected_datetime = datetime(
+                        year=date_obj.year,
+                        month=date_obj.month,
+                        day=date_obj.day,
+                        hour=event_hour,
+                        minute=event_minute
+                    ).astimezone()
+                    
+                    event_details.append((corrected_datetime, event_address))
+                    print(f"Added booking: {corrected_datetime.strftime('%H:%M')} ({event_hour}:{event_minute:02d}) at {event_address}")
+                    
+                    # Add debug to show original vs corrected time
+                    print(f"  Original time: {event_datetime.strftime('%H:%M')}, Corrected: {corrected_datetime.strftime('%H:%M')}")
             except Exception as e:
                 print(f"Error processing event: {e}")
                 continue
@@ -308,11 +340,47 @@ def check_slot_availability(service, date: str, time: str) -> bool:
                     print(f"Error parsing date: {e}")
                     return False
         
-        # Format the time with timezone
-        time_min = slot_datetime.astimezone().isoformat()
-        time_max = (slot_datetime + timedelta(hours=1)).astimezone().isoformat()
+        # Add debug print to see the original date/time
+        print(f"Original slot check: {date} {time} -> {slot_datetime}")
         
-        print(f"Checking availability for slot: {time_min} to {time_max}")
+        # Check if this slot is specifically 10:30, which might have a time zone issue
+        # and we need to ensure we're looking for events at exactly 10:30, not 9:30
+        slot_hour = slot_datetime.hour
+        slot_minute = slot_datetime.minute
+        is_known_slot = False
+        
+        # Check if this is one of our standard slots (only necessary in problem cases)
+        for day_slots in AVAILABLE_SLOTS.values():
+            for slot_time in day_slots:
+                slot_parts = slot_time.split(':')
+                if len(slot_parts) == 2:
+                    if int(slot_parts[0]) == slot_hour and int(slot_parts[1]) == slot_minute:
+                        is_known_slot = True
+                        break
+            if is_known_slot:
+                break
+        
+        # Build the time window to check for events
+        # For known slots, use exact hours. For arbitrary times, use the usual 1-hour window.
+        if is_known_slot:
+            # Make sure we're looking for EXACTLY the slot time with no timezone offset issues
+            # Create a naive datetime for the exact slot time
+            naive_slot = datetime(
+                year=slot_datetime.year, 
+                month=slot_datetime.month, 
+                day=slot_datetime.day,
+                hour=slot_hour,
+                minute=slot_minute
+            )
+            # Add timezone explicitly using astimezone() without any offset calculation
+            time_min = naive_slot.replace(tzinfo=datetime.now().astimezone().tzinfo).isoformat()
+            time_max = (naive_slot.replace(tzinfo=datetime.now().astimezone().tzinfo) + timedelta(minutes=30)).isoformat()
+            print(f"Checking availability for EXACT slot time: {time_min} to {time_max}")
+        else:
+            # Use the original method for non-standard times
+            time_min = slot_datetime.astimezone().isoformat()
+            time_max = (slot_datetime + timedelta(hours=1)).astimezone().isoformat()
+            print(f"Checking availability for general time slot: {time_min} to {time_max}")
         
         # Check events in the calendar
         events_result = service.events().list(
@@ -329,7 +397,15 @@ def check_slot_availability(service, date: str, time: str) -> bool:
         if events:
             print(f"Found {len(events)} events in this time slot:")
             for event in events:
-                print(f"- {event.get('summary', '')} at {event.get('start', {}).get('dateTime', '')}")
+                start_time = event.get('start', {}).get('dateTime', '')
+                if start_time:
+                    try:
+                        event_time = datetime.fromisoformat(start_time.replace('Z', '+00:00')).astimezone()
+                        print(f"- {event.get('summary', '')} at {event_time.strftime('%Y-%m-%d %H:%M')} ({start_time})")
+                    except:
+                        print(f"- {event.get('summary', '')} at {start_time}")
+                else:
+                    print(f"- {event.get('summary', '')} at {start_time}")
             return False
             
         return True
@@ -400,22 +476,44 @@ def create_booking(service, date: str, time: str, customer_name: str, address: s
     """Create a booking in Google Calendar."""
     try:
         print(f"Attempting to create booking for {customer_name} on {date} at {time}")
-        slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M')
+        
+        # Parse date and time directly to avoid timezone inconsistencies
+        date_obj = datetime.strptime(date, '%Y-%m-%d')
+        
+        # Parse time directly to extract hours and minutes
+        time_parts = time.split(':')
+        hour = int(time_parts[0])
+        minute = int(time_parts[1]) if len(time_parts) > 1 else 0
+        
+        # Create a datetime with the correct time
+        slot_datetime = datetime(
+            year=date_obj.year,
+            month=date_obj.month,
+            day=date_obj.day,
+            hour=hour,
+            minute=minute
+        )
         
         # Extract area from address
         # Split by comma and take the second part (after the street address)
         address_parts = [part.strip() for part in address.split(',')]
         area = address_parts[1] if len(address_parts) > 1 else ""
         
+        # Make the datetime timezone aware for Google Calendar
+        aware_datetime = slot_datetime.astimezone()
+        
+        # Log the exact time being used
+        print(f"Creating booking for exact time: {aware_datetime.strftime('%Y-%m-%d %H:%M')} (Hour: {hour}, Minute: {minute})")
+        
         event = {
             'summary': f'{customer_name} {area}',
             'description': f'Customer: {customer_name}\nAddress: {address}\nPhone: {phone}',
             'start': {
-                'dateTime': slot_datetime.astimezone().isoformat(),
+                'dateTime': aware_datetime.isoformat(),
                 'timeZone': 'Europe/London',
             },
             'end': {
-                'dateTime': (slot_datetime + timedelta(hours=1)).astimezone().isoformat(),
+                'dateTime': (aware_datetime + timedelta(hours=1)).isoformat(),
                 'timeZone': 'Europe/London',
             },
         }
