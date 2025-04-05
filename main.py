@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 import requests
 from typing import Dict, List, Optional
 import logging
-import re
 
 # If modifying these scopes, delete the file token.pickle.
 SCOPES = ['https://www.googleapis.com/auth/calendar']
@@ -26,7 +25,7 @@ CALENDAR_ID = 'clivestunings@googlemail.com'  # Clive's tuning calendar
 AVAILABLE_SLOTS = {
     'Tuesday': ['10:30', '12:00', '13:30', '15:00', '16:00'],
     'Wednesday': ['09:00', '10:30', '12:00', '13:30', '15:00', '16:00'],
-    'Thursday': ['10:30', '12:00', '13:30', '15:00', '16:00']
+    'Thursday': ['10:30', '12:00', '13:30', '15:00']
 }
 
 app = Flask(__name__)
@@ -68,7 +67,7 @@ def get_google_calendar_service():
     """Get Google Calendar service using service account."""
     try:
         credentials = service_account.Credentials.from_service_account_file(
-            '/etc/secrets/service-account-key.json',
+            'credentials/service-account-key.json',
             scopes=SCOPES
         )
         return build('calendar', 'v3', credentials=credentials)
@@ -94,56 +93,25 @@ def check_distance(origin: str) -> Optional[int]:
 def check_distance_from_adjacent_bookings(service, date: str, time: str, customer_address: str) -> bool:
     """Check if the booking location is within 10 miles of any adjacent bookings."""
     try:
-        # Get the booking time as a naive datetime first
-        date_obj = datetime.strptime(date, '%Y-%m-%d')
-        time_parts = time.split(':')
-        hour = int(time_parts[0])
-        minute = int(time_parts[1]) if len(time_parts) > 1 else 0
-        
-        # Create a naive datetime
-        booking_datetime_naive = datetime(
-            year=date_obj.year, 
-            month=date_obj.month, 
-            day=date_obj.day, 
-            hour=hour, 
-            minute=minute
-        )
-        
-        # Create an aware version for display only
-        booking_datetime = booking_datetime_naive.astimezone()
-        
-        # Make sure we have a postcode for the customer
-        customer_postcode = customer_address
-        # If it looks like a full address, try to extract the postcode
-        if ',' in customer_address or len(customer_address.split()) > 2:
-            # Try to extract postcode using regex
-            postcode_pattern = r'[A-Z]{1,2}[0-9]{1,2}[A-Z]?\s?[0-9][A-Z]{2}'
-            postcode_matches = re.findall(postcode_pattern, customer_address.upper())
-            if postcode_matches:
-                customer_postcode = postcode_matches[0]
-                print(f"Extracted customer postcode: {customer_postcode} from address: {customer_address}")
+        # Get the booking time and make it timezone aware
+        booking_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M').astimezone()
         
         print(f"\nChecking distances for slot on {date} at {time}")
-        print(f"Parsed booking time: {booking_datetime.strftime('%Y-%m-%d %H:%M')}")
-        print(f"Customer postcode: {customer_postcode}")
+        print(f"Customer postcode: {customer_address}")
         print(f"\n{'='*80}")
         print(f"Checking bookings for {booking_datetime.strftime('%Y-%m-%d')} at {booking_datetime.strftime('%H:%M')}")
         print(f"{'='*80}\n")
         
-        # Get events for the entire day - use naive datetimes for consistency
-        day_start = booking_datetime_naive.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_end = day_start + timedelta(days=1)
-        
-        # Convert to aware datetime for API call
-        time_min = day_start.astimezone().isoformat()
-        time_max = day_end.astimezone().isoformat()
+        # Get events for the entire day
+        day_start = booking_datetime.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = (day_start + timedelta(days=1))
         
         print(f"Searching for events between {day_start.strftime('%Y-%m-%d %H:%M')} and {day_end.strftime('%Y-%m-%d %H:%M')}")
         
         events_result = service.events().list(
             calendarId=CALENDAR_ID,
-            timeMin=time_min,
-            timeMax=time_max,
+            timeMin=day_start.isoformat(),
+            timeMax=day_end.isoformat(),
             singleEvents=True,
             orderBy='startTime',
             maxResults=100
@@ -191,21 +159,8 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
                     # This is a time slot list, create individual events for each time
                     time_slots = summary.split()
                     for slot in time_slots:
-                        # Create naive datetime for time slots
-                        slot_parts = slot.split(':')
-                        slot_hour = int(slot_parts[0])
-                        slot_minute = int(slot_parts[1]) if len(slot_parts) > 1 else 0
-                        
-                        # Create naive datetime for this slot
-                        slot_naive = datetime(
-                            year=date_obj.year,
-                            month=date_obj.month,
-                            day=date_obj.day,
-                            hour=slot_hour,
-                            minute=slot_minute
-                        )
-                        
-                        event_details.append((slot_naive, None))  # No address for time slot lists
+                        slot_datetime = datetime.strptime(f"{date} {slot}", '%Y-%m-%d %H:%M').astimezone()
+                        event_details.append((slot_datetime, None))  # No address for time slot lists
                     continue
                 
                 # Get the location from either the description or the summary
@@ -234,50 +189,10 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
                     if location_words:
                         event_address = location_words[-1].title()
                 
-                # Extract postcode from event address if possible
-                event_postcode = event_address
-                if event_address and (',' in event_address or len(event_address.split()) > 2):
-                    # Try to extract postcode using regex
-                    postcode_matches = re.findall(postcode_pattern, event_address.upper())
-                    if postcode_matches:
-                        event_postcode = postcode_matches[0]
-                        print(f"Extracted event postcode: {event_postcode} from address: {event_address}")
-                    else:
-                        # If no postcode detected, use the last part of the address as it might be the postcode
-                        address_parts = [part.strip() for part in event_address.split(',')]
-                        if address_parts:
-                            possible_postcode = address_parts[-1].strip()
-                            if possible_postcode and len(possible_postcode.split()) <= 2:
-                                event_postcode = possible_postcode
-                                print(f"Using last part of event address as postcode: {event_postcode}")
-                
                 if event_start:
-                    event_datetime_str = event_start.replace('Z', '+00:00')
-                    event_datetime = datetime.fromisoformat(event_datetime_str).astimezone()
-                    
-                    # Extract exact components to avoid timezone shifts
-                    event_hour = event_datetime.hour
-                    event_minute = event_datetime.minute
-                    
-                    # Create a naive datetime for comparison
-                    event_naive = datetime(
-                        year=date_obj.year,
-                        month=date_obj.month,
-                        day=date_obj.day,
-                        hour=event_hour,
-                        minute=event_minute
-                    )
-                    
-                    # For logs, also create an aware version
-                    event_aware = event_naive.astimezone()
-                    
-                    # Use naive datetime for internal comparisons and the extracted postcode
-                    event_details.append((event_naive, event_postcode))
-                    
-                    print(f"Added booking: {event_aware.strftime('%H:%M')} ({event_hour}:{event_minute:02d}) at {event_address}")
-                    print(f"  Original time: {event_datetime.strftime('%H:%M')}, Corrected: {event_aware.strftime('%H:%M')}")
-                    if event_postcode != event_address:
-                        print(f"  Using postcode: {event_postcode} for distance calculation")
+                    event_datetime = datetime.fromisoformat(event_start.replace('Z', '+00:00')).astimezone()
+                    event_details.append((event_datetime, event_address))
+                    print(f"Added booking: {event_datetime.strftime('%H:%M')} at {event_address}")
             except Exception as e:
                 print(f"Error processing event: {e}")
                 continue
@@ -292,7 +207,7 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
         # Find the position where our new booking would fit
         insert_index = 0
         for i, (event_time, _) in enumerate(event_details):
-            if event_time > booking_datetime_naive:  # Compare same types (both naive)
+            if event_time > booking_datetime:
                 break
             insert_index = i + 1
         
@@ -305,28 +220,28 @@ def check_distance_from_adjacent_bookings(service, date: str, time: str, custome
         if insert_index > 0:
             prev_time, prev_address = event_details[insert_index - 1]
             if prev_address:  # Only check distance if we have a valid address
-                url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={customer_postcode}&destinations={prev_address}&key={DISTANCE_MATRIX_API_KEY}"
+                url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={customer_address}&destinations={prev_address}&key={DISTANCE_MATRIX_API_KEY}"
                 response = requests.get(url)
                 data = response.json()
                 
                 if data['status'] == 'OK' and data['rows'][0]['elements'][0]['status'] == 'OK':
                     distance = data['rows'][0]['elements'][0]['distance']['value']  # Distance in meters
                     prev_distance = distance / 1609.34  # Convert to miles
-                    time_diff = (booking_datetime_naive - prev_time).total_seconds() / 3600  # Convert to hours
+                    time_diff = (booking_datetime - prev_time).total_seconds() / 3600  # Convert to hours
                     distances.append(('previous', prev_distance, time_diff, prev_address))
         
         # Check next booking if it exists
         if insert_index < len(event_details):
             next_time, next_address = event_details[insert_index]
             if next_address:  # Only check distance if we have a valid address
-                url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={customer_postcode}&destinations={next_address}&key={DISTANCE_MATRIX_API_KEY}"
+                url = f"https://maps.googleapis.com/maps/api/distancematrix/json?origins={customer_address}&destinations={next_address}&key={DISTANCE_MATRIX_API_KEY}"
                 response = requests.get(url)
                 data = response.json()
                 
                 if data['status'] == 'OK' and data['rows'][0]['elements'][0]['status'] == 'OK':
                     distance = data['rows'][0]['elements'][0]['distance']['value']  # Distance in meters
                     next_distance = distance / 1609.34  # Convert to miles
-                    time_diff = (next_time - booking_datetime_naive).total_seconds() / 3600  # Convert to hours
+                    time_diff = (next_time - booking_datetime).total_seconds() / 3600  # Convert to hours
                     distances.append(('next', next_distance, time_diff, next_address))
         
         # Print distances in a clear format
@@ -369,39 +284,35 @@ def get_available_slots(date: str) -> List[str]:
 def check_slot_availability(service, date: str, time: str) -> bool:
     """Check if a specific time slot is available in Google Calendar."""
     try:
-        # Create a naive datetime first
-        date_obj = datetime.strptime(date, '%Y-%m-%d')
+        # Ensure date is in YYYY-MM-DD format
+        try:
+            # If date is already in YYYY-MM-DD format, use it directly
+            slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M %p')
+        except ValueError:
+            try:
+                # Try with just YYYY-MM-DD and HH:MM format
+                slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M')
+            except ValueError:
+                # If date is in another format, try to parse it
+                try:
+                    # Try parsing with different formats
+                    for fmt in ['%A, %B %d', '%B %d', '%d/%m/%Y', '%Y-%m-%d']:
+                        try:
+                            slot_datetime = datetime.strptime(f"{date} {time}", f"{fmt} %H:%M")
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        raise ValueError(f"Could not parse date: {date}")
+                except ValueError as e:
+                    print(f"Error parsing date: {e}")
+                    return False
         
-        # Parse time components
-        time_parts = time.split(':')
-        if len(time_parts) == 2:
-            hour = int(time_parts[0])
-            minute = int(time_parts[1])
-        else:
-            # Default to top of the hour if no minutes specified
-            hour = int(time)
-            minute = 0
+        # Format the time with timezone
+        time_min = slot_datetime.astimezone().isoformat()
+        time_max = (slot_datetime + timedelta(hours=1)).astimezone().isoformat()
         
-        # Create naive datetime for the slot
-        slot_naive = datetime(
-            year=date_obj.year,
-            month=date_obj.month,
-            day=date_obj.day,
-            hour=hour,
-            minute=minute
-        )
-        
-        # Create aware version for API call only
-        slot_aware = slot_naive.astimezone()
-        
-        print(f"Checking availability for: {date} {time} -> {slot_aware}")
-        
-        # Create time window - use consistent timezone handling
-        # For exact time checking, use a 30-minute window
-        time_min = slot_aware.isoformat()
-        time_max = (slot_aware + timedelta(minutes=30)).isoformat()
-        
-        print(f"Checking time window: {time_min} to {time_max}")
+        print(f"Checking availability for slot: {time_min} to {time_max}")
         
         # Check events in the calendar
         events_result = service.events().list(
@@ -418,23 +329,7 @@ def check_slot_availability(service, date: str, time: str) -> bool:
         if events:
             print(f"Found {len(events)} events in this time slot:")
             for event in events:
-                start_time = event.get('start', {}).get('dateTime', '')
-                if start_time:
-                    try:
-                        # Parse the event time as naive for consistent comparison
-                        event_datetime = datetime.fromisoformat(start_time.replace('Z', '+00:00')).astimezone()
-                        event_naive = datetime(
-                            year=date_obj.year,
-                            month=date_obj.month,
-                            day=date_obj.day,
-                            hour=event_datetime.hour,
-                            minute=event_datetime.minute
-                        )
-                        print(f"- {event.get('summary', '')} at {event_naive.strftime('%Y-%m-%d %H:%M')} (original: {start_time})")
-                    except Exception as e:
-                        print(f"- {event.get('summary', '')} at {start_time} (error parsing: {e})")
-                else:
-                    print(f"- {event.get('summary', '')} at {start_time}")
+                print(f"- {event.get('summary', '')} at {event.get('start', {}).get('dateTime', '')}")
             return False
             
         return True
@@ -505,46 +400,22 @@ def create_booking(service, date: str, time: str, customer_name: str, address: s
     """Create a booking in Google Calendar."""
     try:
         print(f"Attempting to create booking for {customer_name} on {date} at {time}")
-        
-        # Parse date and time directly to avoid timezone inconsistencies
-        date_obj = datetime.strptime(date, '%Y-%m-%d')
-        
-        # Parse time directly to extract hours and minutes
-        time_parts = time.split(':')
-        hour = int(time_parts[0])
-        minute = int(time_parts[1]) if len(time_parts) > 1 else 0
-        
-        # Create a naive datetime first
-        slot_naive = datetime(
-            year=date_obj.year,
-            month=date_obj.month,
-            day=date_obj.day,
-            hour=hour,
-            minute=minute
-        )
-        
-        # Convert to timezone-aware for API call
-        aware_datetime = slot_naive.astimezone()
+        slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M')
         
         # Extract area from address
         # Split by comma and take the second part (after the street address)
         address_parts = [part.strip() for part in address.split(',')]
         area = address_parts[1] if len(address_parts) > 1 else ""
         
-        # Log the exact time being used
-        print(f"Creating booking for exact time: {aware_datetime.strftime('%Y-%m-%d %H:%M')} (Hour: {hour}, Minute: {minute})")
-        print(f"Naive time: {slot_naive.strftime('%Y-%m-%d %H:%M')}")
-        print(f"Aware time: {aware_datetime.strftime('%Y-%m-%d %H:%M%z')}")
-        
         event = {
             'summary': f'{customer_name} {area}',
             'description': f'Customer: {customer_name}\nAddress: {address}\nPhone: {phone}',
             'start': {
-                'dateTime': aware_datetime.isoformat(),
+                'dateTime': slot_datetime.astimezone().isoformat(),
                 'timeZone': 'Europe/London',
             },
             'end': {
-                'dateTime': (aware_datetime + timedelta(hours=1)).isoformat(),
+                'dateTime': (slot_datetime + timedelta(hours=1)).astimezone().isoformat(),
                 'timeZone': 'Europe/London',
             },
         }
@@ -690,28 +561,9 @@ def create_booking_endpoint():
         if not check_slot_availability(service, data['date'], data['time']):
             return jsonify({'error': 'Selected time slot is no longer available'}), 400
 
-        # Extract postcode from address for distance checking
-        address = data['address']
-        postcode = None
-        
-        # Common UK postcode pattern: 1-2 letters, 1-2 digits, space, 1 digit, 2 letters
-        postcode_pattern = r'[A-Z]{1,2}[0-9]{1,2}[A-Z]?\s?[0-9][A-Z]{2}'
-        postcode_matches = re.findall(postcode_pattern, address.upper())
-        
-        if postcode_matches:
-            postcode = postcode_matches[0]
-            print(f"Extracted postcode: {postcode} from address: {address}")
-        else:
-            # If no postcode detected, use the last part of the address as it might be the postcode
-            address_parts = [part.strip() for part in address.split(',')]
-            if address_parts:
-                postcode = address_parts[-1].strip()
-                print(f"Using last part of address as postcode: {postcode}")
-
-        print(f"Checking distance for postcode: {postcode}")
-        distance = check_distance(postcode)
+        distance = check_distance(data['address'])
         if distance is None:
-            return jsonify({'error': 'Could not verify distance from postcode. Please ensure your address includes a valid UK postcode.'}), 400
+            return jsonify({'error': 'Could not verify distance'}), 400
 
         # Create the booking
         if create_booking(service, data['date'], data['time'], 
@@ -762,30 +614,12 @@ def direct_booking():
             print("Selected time slot is no longer available")
             return jsonify({'error': 'Selected time slot is no longer available'}), 400
         
-        # Extract postcode from address for distance checking
-        address = data['address']
-        postcode = None
-        
-        # Common UK postcode pattern: 1-2 letters, 1-2 digits, space, 1 digit, 2 letters
-        postcode_pattern = r'[A-Z]{1,2}[0-9]{1,2}[A-Z]?\s?[0-9][A-Z]{2}'
-        postcode_matches = re.findall(postcode_pattern, address.upper())
-        
-        if postcode_matches:
-            postcode = postcode_matches[0]
-            print(f"Extracted postcode: {postcode} from address: {address}")
-        else:
-            # If no postcode detected, use the last part of the address as it might be the postcode
-            address_parts = [part.strip() for part in address.split(',')]
-            if address_parts:
-                postcode = address_parts[-1].strip()
-                print(f"Using last part of address as postcode: {postcode}")
-        
         # Check distance
-        print(f"Checking distance for postcode: {postcode}")
-        distance = check_distance(postcode)
+        print(f"Checking distance for address: {data['address']}")
+        distance = check_distance(data['address'])
         if distance is None:
-            print("Could not verify distance from postcode")
-            return jsonify({'error': 'Could not verify distance from postcode. Please ensure your address includes a valid UK postcode.'}), 400
+            print("Could not verify distance")
+            return jsonify({'error': 'Could not verify distance'}), 400
         
         # Create the booking
         print("Attempting to create booking...")
