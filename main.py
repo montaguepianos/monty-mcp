@@ -66,8 +66,17 @@ def log_response_info(response):
 def get_google_calendar_service():
     """Get Google Calendar service using service account."""
     try:
+        # Try Render environment path first
+        credentials_path = '/etc/secrets/service-account-key.json'
+        if not os.path.exists(credentials_path):
+            # Fall back to local development path
+            credentials_path = 'credentials/service-account-key.json'
+            
+        if not os.path.exists(credentials_path):
+            raise FileNotFoundError(f"Could not find credentials file at {credentials_path}")
+            
         credentials = service_account.Credentials.from_service_account_file(
-            'credentials/service-account-key.json',
+            credentials_path,
             scopes=SCOPES
         )
         return build('calendar', 'v3', credentials=credentials)
