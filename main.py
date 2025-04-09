@@ -293,21 +293,21 @@ def get_available_slots(date: str) -> List[str]:
 def check_slot_availability(service, date: str, time: str) -> bool:
     """Check if a specific time slot is available in Google Calendar."""
     try:
-        # Ensure date is in YYYY-MM-DD format
+        # Ensure date is in YYYY-MM-DD format and make it timezone-aware
         try:
             # If date is already in YYYY-MM-DD format, use it directly
-            slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M %p')
+            slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M %p').astimezone()
         except ValueError:
             try:
                 # Try with just YYYY-MM-DD and HH:MM format
-                slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M')
+                slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M').astimezone()
             except ValueError:
                 # If date is in another format, try to parse it
                 try:
                     # Try parsing with different formats
                     for fmt in ['%A, %B %d', '%B %d', '%d/%m/%Y', '%Y-%m-%d']:
                         try:
-                            slot_datetime = datetime.strptime(f"{date} {time}", f"{fmt} %H:%M")
+                            slot_datetime = datetime.strptime(f"{date} {time}", f"{fmt} %H:%M").astimezone()
                             break
                         except ValueError:
                             continue
@@ -318,8 +318,8 @@ def check_slot_availability(service, date: str, time: str) -> bool:
                     return False
         
         # Format the time with timezone
-        time_min = slot_datetime.astimezone().isoformat()
-        time_max = (slot_datetime + timedelta(hours=1)).astimezone().isoformat()
+        time_min = slot_datetime.isoformat()
+        time_max = (slot_datetime + timedelta(hours=1)).isoformat()
         
         print(f"Checking availability for slot: {time_min} to {time_max}")
         
@@ -329,8 +329,8 @@ def check_slot_availability(service, date: str, time: str) -> bool:
         
         events_result = service.events().list(
             calendarId=CALENDAR_ID,
-            timeMin=day_start.astimezone().isoformat(),
-            timeMax=day_end.astimezone().isoformat(),
+            timeMin=day_start.isoformat(),
+            timeMax=day_end.isoformat(),
             singleEvents=True,
             orderBy='startTime'
         ).execute()
@@ -370,16 +370,16 @@ def check_slot_availability(service, date: str, time: str) -> bool:
 def check_day_availability(service, date_str: str) -> bool:
     """Check if the entire day is available (no 8-hour bookings between 09:00-17:00)."""
     try:
-        # Parse the date
-        date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+        # Parse the date and make it timezone-aware
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d').astimezone()
         
         # Set time limits for the day (9am to 5pm)
         day_start = date_obj.replace(hour=9, minute=0, second=0, microsecond=0)
         day_end = date_obj.replace(hour=17, minute=0, second=0, microsecond=0)
         
         # Format the times with timezone
-        time_min = day_start.astimezone().isoformat()
-        time_max = day_end.astimezone().isoformat()
+        time_min = day_start.isoformat()
+        time_max = day_end.isoformat()
         
         print(f"Checking day availability for: {date_str} between 09:00-17:00")
         
