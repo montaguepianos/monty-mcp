@@ -337,18 +337,8 @@ def check_slot_availability(service, date: str, time: str) -> bool:
         
         events = events_result.get('items', [])
         
-        # Check for time slot lists and existing bookings
+        # First check for actual bookings in this time slot
         for event in events:
-            summary = event.get('summary', '').lower()
-            
-            # Check if this is a time slot list
-            if all(slot.replace(':', '').isdigit() for slot in summary.split()):
-                time_slots = summary.split()
-                if time in time_slots:
-                    print(f"Found time slot list containing {time}")
-                    return False
-            
-            # Check event duration and overlap
             event_start = event.get('start', {}).get('dateTime')
             event_end = event.get('end', {}).get('dateTime')
             
@@ -362,6 +352,19 @@ def check_slot_availability(service, date: str, time: str) -> bool:
                     print(f"Found overlapping event: {event.get('summary', '')} from {start_time.strftime('%H:%M')} to {end_time.strftime('%H:%M')}")
                     return False
         
+        # Then check for time slot lists
+        for event in events:
+            summary = event.get('summary', '').lower()
+            
+            # Check if this is a time slot list
+            if all(slot.replace(':', '').isdigit() for slot in summary.split()):
+                time_slots = summary.split()
+                # If the time is in the list, it means it's available
+                if time in time_slots:
+                    print(f"Found time slot list containing {time} - slot is available")
+                    return True
+        
+        # If we get here, the slot is available
         return True
     except Exception as e:
         print(f"Error checking slot availability: {e}")
@@ -393,13 +396,6 @@ def check_day_availability(service, date_str: str) -> bool:
         ).execute()
         
         events = events_result.get('items', [])
-        
-        # Check for time slot lists first
-        for event in events:
-            summary = event.get('summary', '').lower()
-            if all(slot.replace(':', '').isdigit() for slot in summary.split()):
-                print(f"Found time slot list for the day: {summary}")
-                return False
         
         # Look for a booking that spans the entire 09:00-17:00 period (8 hours)
         for event in events:
