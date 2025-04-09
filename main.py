@@ -66,17 +66,8 @@ def log_response_info(response):
 def get_google_calendar_service():
     """Get Google Calendar service using service account."""
     try:
-        # Try Render environment path first
-        credentials_path = '/etc/secrets/service-account-key.json'
-        if not os.path.exists(credentials_path):
-            # Fall back to local development path
-            credentials_path = 'credentials/service-account-key.json'
-            
-        if not os.path.exists(credentials_path):
-            raise FileNotFoundError(f"Could not find credentials file at {credentials_path}")
-            
         credentials = service_account.Credentials.from_service_account_file(
-            credentials_path,
+            'credentials/service-account-key.json',
             scopes=SCOPES
         )
         return build('calendar', 'v3', credentials=credentials)
@@ -293,21 +284,21 @@ def get_available_slots(date: str) -> List[str]:
 def check_slot_availability(service, date: str, time: str) -> bool:
     """Check if a specific time slot is available in Google Calendar."""
     try:
-        # Ensure date is in YYYY-MM-DD format and make it timezone-aware
+        # Ensure date is in YYYY-MM-DD format
         try:
             # If date is already in YYYY-MM-DD format, use it directly
-            slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M %p').astimezone()
+            slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M %p')
         except ValueError:
             try:
                 # Try with just YYYY-MM-DD and HH:MM format
-                slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M').astimezone()
+                slot_datetime = datetime.strptime(f"{date} {time}", '%Y-%m-%d %H:%M')
             except ValueError:
                 # If date is in another format, try to parse it
                 try:
                     # Try parsing with different formats
                     for fmt in ['%A, %B %d', '%B %d', '%d/%m/%Y', '%Y-%m-%d']:
                         try:
-                            slot_datetime = datetime.strptime(f"{date} {time}", f"{fmt} %H:%M").astimezone()
+                            slot_datetime = datetime.strptime(f"{date} {time}", f"{fmt} %H:%M")
                             break
                         except ValueError:
                             continue
@@ -318,53 +309,29 @@ def check_slot_availability(service, date: str, time: str) -> bool:
                     return False
         
         # Format the time with timezone
-        time_min = slot_datetime.isoformat()
-        time_max = (slot_datetime + timedelta(hours=1)).isoformat()
+        time_min = slot_datetime.astimezone().isoformat()
+        time_max = (slot_datetime + timedelta(hours=1)).astimezone().isoformat()
         
         print(f"Checking availability for slot: {time_min} to {time_max}")
         
-        # Get events for the entire day to check for time slot lists
-        day_start = slot_datetime.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_end = (day_start + timedelta(days=1))
-        
+        # Check events in the calendar
         events_result = service.events().list(
             calendarId=CALENDAR_ID,
-            timeMin=day_start.isoformat(),
-            timeMax=day_end.isoformat(),
+            timeMin=time_min,
+            timeMax=time_max,
             singleEvents=True,
             orderBy='startTime'
         ).execute()
         
         events = events_result.get('items', [])
         
-        # First check for actual bookings in this time slot
-        for event in events:
-            event_start = event.get('start', {}).get('dateTime')
-            event_end = event.get('end', {}).get('dateTime')
+        # If there are any events in this time slot, it's not available
+        if events:
+            print(f"Found {len(events)} events in this time slot:")
+            for event in events:
+                print(f"- {event.get('summary', '')} at {event.get('start', {}).get('dateTime', '')}")
+            return False
             
-            if event_start and event_end:
-                start_time = datetime.fromisoformat(event_start.replace('Z', '+00:00')).astimezone()
-                end_time = datetime.fromisoformat(event_end.replace('Z', '+00:00')).astimezone()
-                
-                # Check if the event overlaps with our slot
-                if (start_time <= slot_datetime and end_time > slot_datetime) or \
-                   (start_time < (slot_datetime + timedelta(hours=1)) and end_time >= (slot_datetime + timedelta(hours=1))):
-                    print(f"Found overlapping event: {event.get('summary', '')} from {start_time.strftime('%H:%M')} to {end_time.strftime('%H:%M')}")
-                    return False
-        
-        # Then check for time slot lists
-        for event in events:
-            summary = event.get('summary', '').lower()
-            
-            # Check if this is a time slot list
-            if all(slot.replace(':', '').isdigit() for slot in summary.split()):
-                time_slots = summary.split()
-                # If the time is in the list, it means it's available
-                if time in time_slots:
-                    print(f"Found time slot list containing {time} - slot is available")
-                    return True
-        
-        # If we get here, the slot is available
         return True
     except Exception as e:
         print(f"Error checking slot availability: {e}")
@@ -373,16 +340,16 @@ def check_slot_availability(service, date: str, time: str) -> bool:
 def check_day_availability(service, date_str: str) -> bool:
     """Check if the entire day is available (no 8-hour bookings between 09:00-17:00)."""
     try:
-        # Parse the date and make it timezone-aware
-        date_obj = datetime.strptime(date_str, '%Y-%m-%d').astimezone()
+        # Parse the date
+        date_obj = datetime.strptime(date_str, '%Y-%m-%d')
         
         # Set time limits for the day (9am to 5pm)
         day_start = date_obj.replace(hour=9, minute=0, second=0, microsecond=0)
         day_end = date_obj.replace(hour=17, minute=0, second=0, microsecond=0)
         
         # Format the times with timezone
-        time_min = day_start.isoformat()
-        time_max = day_end.isoformat()
+        time_min = day_start.astimezone().isoformat()
+        time_max = day_end.astimezone().isoformat()
         
         print(f"Checking day availability for: {date_str} between 09:00-17:00")
         
