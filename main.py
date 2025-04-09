@@ -314,24 +314,45 @@ def check_slot_availability(service, date: str, time: str) -> bool:
         
         print(f"Checking availability for slot: {time_min} to {time_max}")
         
-        # Check events in the calendar
+        # Get events for the entire day to check for time slot lists
+        day_start = slot_datetime.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_end = (day_start + timedelta(days=1))
+        
         events_result = service.events().list(
             calendarId=CALENDAR_ID,
-            timeMin=time_min,
-            timeMax=time_max,
+            timeMin=day_start.astimezone().isoformat(),
+            timeMax=day_end.astimezone().isoformat(),
             singleEvents=True,
             orderBy='startTime'
         ).execute()
         
         events = events_result.get('items', [])
         
-        # If there are any events in this time slot, it's not available
-        if events:
-            print(f"Found {len(events)} events in this time slot:")
-            for event in events:
-                print(f"- {event.get('summary', '')} at {event.get('start', {}).get('dateTime', '')}")
-            return False
+        # Check for time slot lists and existing bookings
+        for event in events:
+            summary = event.get('summary', '').lower()
             
+            # Check if this is a time slot list
+            if all(slot.replace(':', '').isdigit() for slot in summary.split()):
+                time_slots = summary.split()
+                if time in time_slots:
+                    print(f"Found time slot list containing {time}")
+                    return False
+            
+            # Check event duration and overlap
+            event_start = event.get('start', {}).get('dateTime')
+            event_end = event.get('end', {}).get('dateTime')
+            
+            if event_start and event_end:
+                start_time = datetime.fromisoformat(event_start.replace('Z', '+00:00')).astimezone()
+                end_time = datetime.fromisoformat(event_end.replace('Z', '+00:00')).astimezone()
+                
+                # Check if the event overlaps with our slot
+                if (start_time <= slot_datetime and end_time > slot_datetime) or \
+                   (start_time < (slot_datetime + timedelta(hours=1)) and end_time >= (slot_datetime + timedelta(hours=1))):
+                    print(f"Found overlapping event: {event.get('summary', '')} from {start_time.strftime('%H:%M')} to {end_time.strftime('%H:%M')}")
+                    return False
+        
         return True
     except Exception as e:
         print(f"Error checking slot availability: {e}")
@@ -363,6 +384,13 @@ def check_day_availability(service, date_str: str) -> bool:
         ).execute()
         
         events = events_result.get('items', [])
+        
+        # Check for time slot lists first
+        for event in events:
+            summary = event.get('summary', '').lower()
+            if all(slot.replace(':', '').isdigit() for slot in summary.split()):
+                print(f"Found time slot list for the day: {summary}")
+                return False
         
         # Look for a booking that spans the entire 09:00-17:00 period (8 hours)
         for event in events:
